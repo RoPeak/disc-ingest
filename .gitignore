@@ -1,0 +1,11 @@
+# Local configuration and state
+.env
+.env.*
+!.env.example
+*.log
+*.tsv
+
+# Test and editor artifacts
+tmp/
+.vscode/
+.idea/

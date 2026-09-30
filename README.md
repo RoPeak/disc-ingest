@@ -4,9 +4,15 @@ A deliberately small interactive Bash wrapper around MakeMKV for acquiring video
 
 ## Install
 
-The supported deployment is a checkout at `/home/ronan/server-tools/disc-ingest` and a symlink from `~/.local/bin/disc-ingest` to `bin/disc-ingest`.
+Keep the checkout in a location you control, then expose `bin/disc-ingest` on
+your `PATH` (for example with a symlink from `~/.local/bin/disc-ingest`).
 
-Defaults are `/dev/sr0`, `disc:0`, `/srv/data/ingest/movies`, and `/srv/data/ingest/tv`. Testing and unusual hardware can override `DISC_INGEST_DEVICE`, `DISC_INGEST_DISC`, `DISC_INGEST_MOVIES_ROOT`, `DISC_INGEST_TV_ROOT`, `DISC_INGEST_MAKEMKV`, and `DISC_INGEST_STATE_HOME`.
+The optical drive, disc source, movie and TV Incoming roots, MakeMKV command,
+and state location are configurable through `DISC_INGEST_DEVICE`,
+`DISC_INGEST_DISC`, `DISC_INGEST_MOVIES_ROOT`, `DISC_INGEST_TV_ROOT`,
+`DISC_INGEST_MAKEMKV`, and `DISC_INGEST_STATE_HOME`. Configure the two Incoming
+roots explicitly for a new deployment. The state file follows XDG state storage
+by default.
 
 `disc-ingest --verbose` shows raw MakeMKV robot lines. Normal inspect-only mode performs no writes. Confirmed rip operations are appended to `$XDG_STATE_HOME/disc-ingest/operations.tsv` (or `~/.local/state/disc-ingest/operations.tsv`).
 
