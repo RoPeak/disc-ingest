@@ -2,13 +2,13 @@
 set -Eeuo pipefail
 
 mode=${FAKE_MODE:-positive}
-command=${*: -3:1}
 if [[ $* == *' info '* ]]; then
     case $mode in
         empty) printf 'MSG:5010,0,0,"Failed to open disc","",""\nTCOUNT:0\n' ;;
         missing) printf 'MSG:5010,0,0,"Failed to open disc","",""\n' ;;
         malformed) printf 'TCOUNT:not-a-number\n' ;;
         positive|*)
+            printf 'PRGT:5018,0,"Opening disc"\nPRGC:3103,0,"Processing titles"\nPRGV:32768,65536,65536\n'
             printf 'CINFO:1,0,"Fake Disc"\nTCOUNT:3\n'
             printf 'TINFO:0,2,0,"Main Feature"\nTINFO:0,9,0,"1:30:00"\nTINFO:0,10,0,"4000000000"\n'
             printf 'TINFO:1,2,0,"Episode One"\nTINFO:1,9,0,"0:45:00"\nTINFO:1,10,0,"1200000000"\n'
@@ -19,7 +19,15 @@ if [[ $* == *' info '* ]]; then
 fi
 
 dest=${*: -1}
-title=${*: -2:1}
+title=''
+args=("$@")
+for i in "${!args[@]}"; do
+    if [[ ${args[$i]} == mkv ]]; then
+        title=${args[$((i + 2))]}
+        break
+    fi
+done
+[[ -n $title ]] || exit 9
 mkdir -p -- "$dest"
 case $mode in
     fail) exit 7 ;;
@@ -30,5 +38,8 @@ case $mode in
     zero) exit 0 ;;
     multiple) : > "$dest/title_a.mkv"; : > "$dest/title_b.mkv"; exit 0 ;;
     all) : > "$dest/title_t00.mkv"; : > "$dest/title_t01.mkv"; exit 0 ;;
-    *) : > "$dest/title_t$(printf '%02d' "$title").mkv" ;;
+    *)
+        printf 'PRGT:5017,0,"Saving to MKV file"\nPRGV:32768,65536,65536\nPRGV:65536,65536,65536\n'
+        : > "$dest/title_t$(printf '%02d' "$title").mkv"
+        ;;
 esac

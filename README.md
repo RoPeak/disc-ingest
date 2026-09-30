@@ -14,7 +14,11 @@ and state location are configurable through `DISC_INGEST_DEVICE`,
 roots explicitly for a new deployment. The state file follows XDG state storage
 by default.
 
-`disc-ingest --verbose` shows raw MakeMKV robot lines. Normal inspect-only mode performs no writes. Confirmed rip operations are appended to `$XDG_STATE_HOME/disc-ingest/operations.tsv` (or `~/.local/state/disc-ingest/operations.tsv`).
+`disc-ingest` presents one physical-media menu: Movie DVD/video disc, TV DVD/video disc, Audio CD, inspection, and status. It does not advertise Blu-ray capability. Audio-CD selection performs a lightweight drive check and delegates to `music-ingest cd --device …`; it does not duplicate Whipper or music publication logic.
+
+Inspection and ripping translate MakeMKV's `PRGT`/`PRGC` phase titles and `PRGV:current,total,max` progress records into concise status with truthful elapsed time. A percentage is shown only when `total` is positive. Normal output never dumps robot records; `--verbose` adds meaningful backend messages and `--debug` also prints raw records. Every MakeMKV operation retains raw output under `$XDG_STATE_HOME/disc-ingest/logs/` (or `~/.local/state/disc-ingest/logs/`).
+
+A short-lived inspection cache under `$XDG_CACHE_HOME/disc-ingest/` stores structured metadata only. It is reused only after a new lightweight MakeMKV identity probe agrees; `R` or `--rescan` forces a full scan. Confirmed rip operations are appended to `$XDG_STATE_HOME/disc-ingest/operations.tsv`.
 
 ## Validation
 

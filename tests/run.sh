@@ -14,7 +14,7 @@ run_case() {
     mkdir -p "$case_root/movies" "$case_root/tv"
     : > "$case_root/device"
     set +e
-    output=$(printf '%b' "$input" | FAKE_MODE="$mode" DISC_INGEST_MAKEMKV="$FAKE" DISC_INGEST_DEVICE="$case_root/device" DISC_INGEST_MOVIES_ROOT="$case_root/movies" DISC_INGEST_TV_ROOT="$case_root/tv" DISC_INGEST_STATE_HOME="$case_root/state" "$SCRIPT" 2>&1)
+    output=$(printf '%b' "$input" | FAKE_MODE="$mode" DISC_INGEST_MAKEMKV="$FAKE" DISC_INGEST_DEVICE="$case_root/device" DISC_INGEST_MOVIES_ROOT="$case_root/movies" DISC_INGEST_TV_ROOT="$case_root/tv" DISC_INGEST_STATE_HOME="$case_root/state" DISC_INGEST_CACHE_HOME="$case_root/cache" "$SCRIPT" 2>&1)
     rc=$?
     set -e
     if [[ $rc == "$expected" ]]; then
@@ -30,33 +30,33 @@ assert_contains() { [[ $CASE_OUTPUT == *"$1"* ]] || { printf 'FAIL missing: %s\n
 assert_file() { [[ -e "$1" ]] || { printf 'FAIL missing file: %s\n' "$1" >&2; fail=$((fail + 1)); }; }
 assert_absent() { [[ ! -e "$1" ]] || { printf 'FAIL unexpected path: %s\n' "$1" >&2; fail=$((fail + 1)); }; }
 
-run_case empty '3\n' empty 0; assert_contains 'No readable video disc detected'; assert_absent "$CASE_ROOT/state"
-run_case missing '3\n' missing 0; assert_contains 'did not return one valid TCOUNT'; assert_absent "$CASE_ROOT/state"
-run_case malformed '3\n' malformed 0; assert_contains 'did not return one valid TCOUNT'
-run_case inspect '3\n' positive 0; assert_contains 'ID 0'; assert_contains 'duration 1:30:00'; assert_absent "$CASE_ROOT/state"
-run_case cancel '4\n' positive 0; assert_absent "$CASE_ROOT/state"
+run_case empty '4\n' empty 3; assert_contains 'No readable video disc detected'
+run_case missing '4\n' missing 2; assert_contains 'did not return one valid TCOUNT'
+run_case malformed '4\n' malformed 2; assert_contains 'did not return one valid TCOUNT'
+run_case inspect '4\n' positive 0; assert_contains 'ID 0'; assert_contains 'duration 1:30:00'
+run_case cancel '6\n' positive 0; assert_absent "$CASE_ROOT/state"
 
-run_case movie_accept '1\n2\n0\nThe Matrix (1999)\nRIP\nA\nn\n' positive 0
+run_case movie_accept '1\nC\n2\n0\nThe Matrix (1999)\nRIP\nA\n' positive 0
 assert_file "$CASE_ROOT/movies/The Matrix (1999)/The Matrix (1999).mkv"; assert_file "$CASE_ROOT/state/operations.tsv"
-run_case movie_keep "1\n2\n0\nO'Brien\nRIP\nK\nn\n" positive 0
+run_case movie_keep "1\nC\n2\n0\nO'Brien\nRIP\nK\n" positive 0
 assert_file "$CASE_ROOT/movies/O'Brien/title_t00.mkv"
-run_case movie_edit '1\n2\n0\nFilm\nRIP\nE\nFilm [Director Cut].mkv\nn\n' positive 0
+run_case movie_edit '1\nC\n2\n0\nFilm\nRIP\nE\nFilm [Director Cut].mkv\n' positive 0
 assert_file "$CASE_ROOT/movies/Film/Film [Director Cut].mkv"
-run_case traversal '1\n2\n0\n../escape\n' positive 0; assert_contains 'safe basename'; assert_absent "$CASE_ROOT/movies/escape"
+run_case traversal '1\nC\n2\n0\n../escape\n' positive 0; assert_contains 'safe basename'; assert_absent "$CASE_ROOT/movies/escape"
 
 mkdir -p "$WORK/conflict/movies/Exists"
-run_case conflict '1\n2\n0\nExists\nX\n' positive 0; assert_contains 'Destination already exists'
-run_case multi '1\n3\n0, 1\nCollection\nRIP\nFirst\nSecond\nn\n' positive 0
+run_case conflict '1\nC\n2\n0\nExists\nX\n' positive 0; assert_contains 'Destination already exists'
+run_case multi '1\nC\n3\n0, 1\nCollection\nRIP\nFirst\nSecond\n' positive 0
 assert_file "$CASE_ROOT/movies/Collection/First.mkv"; assert_file "$CASE_ROOT/movies/Collection/Second.mkv"
-run_case tv '2\n3\n1,2\nBanshee Season 1 Disc 1\nBanshee S01E01\nBanshee S01E02\nRIP\nA\nA\nn\n' positive 0
+run_case tv '2\nC\n3\n1,2\nBanshee Season 1 Disc 1\nBanshee S01E01\nBanshee S01E02\nRIP\nA\nA\n' positive 0
 assert_file "$CASE_ROOT/tv/Banshee Season 1 Disc 1/Banshee S01E01.mkv"; assert_file "$CASE_ROOT/tv/Banshee Season 1 Disc 1/Banshee S01E02.mkv"
-run_case all_titles '1\n1\nAll titles\nRIP\nFeature\n\nn\n' all 0
+run_case all_titles '1\nC\n1\nAll titles\nRIP\nFeature\n\n\n' all 0
 assert_file "$CASE_ROOT/movies/All titles/Feature.mkv"; assert_file "$CASE_ROOT/movies/All titles/title_t01.mkv"
-run_case zero '1\n2\n0\nZero\nRIP\nn\n' zero 1; assert_contains 'produced 0 new MKVs'; assert_absent "$CASE_ROOT/movies/Zero/title_t00.mkv"
-run_case multiple '1\n2\n0\nMultiple\nRIP\nn\n' multiple 1; assert_file "$CASE_ROOT/movies/Multiple/title_a.mkv"; assert_file "$CASE_ROOT/movies/Multiple/title_b.mkv"
-run_case failure '1\n2\n0\nFail\nRIP\n' fail 1; assert_contains 'failed; any output was retained'
-run_case partial '2\n3\n0,1\nPartial\n\n\nRIP\n\n' partial 1; assert_file "$CASE_ROOT/tv/Partial/title_t01.mkv"
-run_case unicode "1\n2\n0\nAmélie & Léon (2001)\nRIP\nA\nn\n" positive 0; assert_file "$CASE_ROOT/movies/Amélie & Léon (2001)/Amélie & Léon (2001).mkv"
+run_case zero '1\nC\n2\n0\nZero\nRIP\n' zero 1; assert_contains 'produced 0 new MKVs'; assert_absent "$CASE_ROOT/movies/Zero/title_t00.mkv"
+run_case multiple '1\nC\n2\n0\nMultiple\nRIP\n' multiple 1; assert_file "$CASE_ROOT/movies/Multiple/title_a.mkv"; assert_file "$CASE_ROOT/movies/Multiple/title_b.mkv"
+run_case failure '1\nC\n2\n0\nFail\nRIP\n' fail 1; assert_contains 'Rip failed while reading title 0'
+run_case partial '2\nC\n3\n0,1\nPartial\n\n\nRIP\n\n' partial 1; assert_file "$CASE_ROOT/tv/Partial/title_t01.mkv"
+run_case unicode "1\nC\n2\n0\nAmélie & Léon (2001)\nRIP\nA\n" positive 0; assert_file "$CASE_ROOT/movies/Amélie & Léon (2001)/Amélie & Léon (2001).mkv"
 run_case eof '1\n' positive 0; assert_contains 'Cancelled. Nothing was ripped.'
 
 missing="$WORK/no-device"
