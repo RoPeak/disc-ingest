@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+# Acquire titles from an optical video disc into Incoming.  It never publishes media.
+set -Eeuo pipefail
+shopt -s extglob nullglob
+
+DISC_INGEST_DEVICE=${DISC_INGEST_DEVICE:-/dev/sr0}
+DISC_INGEST_DISC=${DISC_INGEST_DISC:-disc:0}
+DISC_INGEST_MOVIES_ROOT=${DISC_INGEST_MOVIES_ROOT:-/srv/data/ingest/movies}
+DISC_INGEST_TV_ROOT=${DISC_INGEST_TV_ROOT:-/srv/data/ingest/tv}
+DISC_INGEST_MAKEMKV=${DISC_INGEST_MAKEMKV:-makemkvcon}
+DISC_INGEST_STATE_HOME=${DISC_INGEST_STATE_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/disc-ingest}
+VERBOSE=false
+[[ ${1:-} == --verbose ]] && VERBOSE=true
+
+DEST=''
+DEST_CREATED=false
+RIP_STARTED=false
+declare -a TITLE_IDS=() TCOUNT_LINES=() NEW_FILES=()
+declare -A TITLE_NAME=() TITLE_DURATION=() TITLE_SIZE=() BEFORE=()
+DISC_SUMMARY=''
+
+say() { printf '%s\n' "$*"; }
+warn() { printf 'Warning: %s\n' "$*" >&2; }
+die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+cancel() { say 'Cancelled. Nothing was ripped.'; exit 0; }
+
+on_interrupt() {
+    say
+    if [[ $RIP_STARTED == true ]]; then
+        say "Interrupted. Any completed or partial output was retained in: ${DEST:-<none>}"
+    else
+        cleanup_empty_destination
+        say 'Cancelled. Nothing was ripped.'
+    fi
+    exit 130
+}
+trap on_interrupt INT TERM
+
+trim() {
+    local value=$1
+    value=${value##+([[:space:]])}
+    value=${value%%+([[:space:]])}
+    printf '%s' "$value"
+}
+
+ask() {
+    local __name=$1 prompt=$2 answer
+    if ! IFS= read -r -p "$prompt" answer; then
+        say
+        cancel
+    fi
+    printf -v "$__name" '%s' "$answer"
+}
+
+valid_basename() {
+    local value=$1
+    [[ -n $value && $value != */* && $value != . && $value != .. ]]
+}
+
+normalise_mkv_name() {
+    local value
+    value=$(trim "$1")
+    valid_basename "$value" || return 1
+    [[ $value == *.mkv ]] || value+=.mkv
+    printf '%s' "$value"
+}
+
+check_drive() {
+    if [[ ! -e $DISC_INGEST_DEVICE ]]; then
+        die "Optical drive is unavailable: ${DISC_INGEST_DEVICE}. Check the device path and drive connection."
+    fi
+    if [[ ! -r $DISC_INGEST_DEVICE ]]; then
+        die "Optical drive is not readable: ${DISC_INGEST_DEVICE}. Check permissions and cdrom membership."
+    fi
+}
+
+check_root() {
+    local root=$1 label=$2
+    [[ -d $root && -w $root ]] || die "${label} ingest root is unavailable or not writable: ${root}"
+}
+
+parse_robot() {
+    local robot=$1 line id field value
+    TCOUNT_LINES=(); TITLE_IDS=(); TITLE_NAME=(); TITLE_DURATION=(); TITLE_SIZE=(); DISC_SUMMARY=''
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line =~ ^TCOUNT:([0-9]+)$ ]]; then
+            TCOUNT_LINES+=("${BASH_REMATCH[1]}")
+        elif [[ $line =~ ^TINFO:([0-9]+),([0-9]+),[0-9]+,\"(.*)\"$ ]]; then
+            id=${BASH_REMATCH[1]}; field=${BASH_REMATCH[2]}; value=${BASH_REMATCH[3]}
+            [[ " ${TITLE_IDS[*]} " == *" $id "* ]] || TITLE_IDS+=("$id")
+            case $field in
+                2) TITLE_NAME[$id]=$value ;;
+                9) TITLE_DURATION[$id]=$value ;;
+                10) TITLE_SIZE[$id]=$value ;;
+            esac
+        elif [[ $line =~ ^CINFO:.*\"(.*)\"$ ]]; then
+            value=${BASH_REMATCH[1]}
+            [[ -z $DISC_SUMMARY ]] && DISC_SUMMARY=$value
+        fi
+    done < "$robot"
+}
+
+inspect_disc() {
+    local robot rc
+    check_drive
+    robot=$(mktemp "${TMPDIR:-/tmp}/disc-ingest-info.XXXXXX")
+    if "$DISC_INGEST_MAKEMKV" --robot info "$DISC_INGEST_DISC" >"$robot" 2>&1; then rc=0; else rc=$?; fi
+    parse_robot "$robot"
+    if [[ $VERBOSE == true ]]; then
+        say 'Raw MakeMKV robot output:'
+        sed 's/^/  /' "$robot"
+    fi
+    if (( ${#TCOUNT_LINES[@]} != 1 )); then
+        warn 'MakeMKV inspection did not return one valid TCOUNT record.'
+        sed -n '1,40p' "$robot" >&2
+        rm -f -- "$robot"
+        return 2
+    fi
+    if (( 10#${TCOUNT_LINES[0]} == 0 )); then
+        say "No readable video disc detected in ${DISC_INGEST_DEVICE}."
+        say 'Insert a disc and try again.'
+        rm -f -- "$robot"
+        return 3
+    fi
+    if (( rc != 0 )); then
+        warn "MakeMKV inspection failed (exit ${rc})."
+        sed -n '1,40p' "$robot" >&2
+        rm -f -- "$robot"
+        return 2
+    fi
+    rm -f -- "$robot"
+    return 0
+}
+
+show_disc() {
+    local id
+    say
+    say "Drive: ${DISC_INGEST_DEVICE}"
+    say "Disc source: ${DISC_INGEST_DISC}"
+    [[ -n $DISC_SUMMARY ]] && say "Disc metadata: ${DISC_SUMMARY}"
+    say "Titles reported: ${TCOUNT_LINES[0]}"
+    if (( ${#TITLE_IDS[@]} )); then
+        say 'Titles:'
+        for id in "${TITLE_IDS[@]}"; do
+            printf '  ID %s' "$id"
+            [[ -n ${TITLE_NAME[$id]:-} ]] && printf ' | %s' "${TITLE_NAME[$id]}"
+            [[ -n ${TITLE_DURATION[$id]:-} ]] && printf ' | duration %s' "${TITLE_DURATION[$id]}"
+            [[ -n ${TITLE_SIZE[$id]:-} ]] && printf ' | size %s' "${TITLE_SIZE[$id]}"
+            printf '\n'
+        done
+    else
+        say 'Title IDs were not exposed by MakeMKV robot output; only All titles is available.'
+    fi
+}
+
+title_exists() {
+    local wanted=$1 id
+    for id in "${TITLE_IDS[@]}"; do [[ $id == "$wanted" ]] && return 0; done
+    return 1
+}
+
+choose_titles() {
+    local selection id raw
+    say; say 'What should be ripped?'; say
+    say '[1] All titles'; say '[2] One title'; say '[3] Specific title IDs'; say '[4] Cancel'; say
+    ask selection 'Choose [1-4]: '
+    case $selection in
+        1) TITLE_IDS=(all) ;;
+        2)
+            ask id 'Title ID: '
+            [[ $id =~ ^[0-9]+$ ]] && title_exists "$id" || die 'Title ID is not present on this disc.'
+            TITLE_IDS=("$id")
+            ;;
+        3)
+            ask raw 'Title IDs, comma-separated: '
+            IFS=',' read -r -a TITLE_IDS <<< "$raw"
+            (( ${#TITLE_IDS[@]} )) || die 'No title IDs supplied.'
+            for id in "${!TITLE_IDS[@]}"; do
+                TITLE_IDS[$id]=$(trim "${TITLE_IDS[$id]}")
+                [[ ${TITLE_IDS[$id]} =~ ^[0-9]+$ ]] && title_exists "${TITLE_IDS[$id]}" || die 'A supplied title ID is not present on this disc.'
+            done
+            ;;
+        4) cancel ;;
+        *) die 'Invalid selection.' ;;
+    esac
+}
+
+snapshot_mkvs() {
+    local path name
+    BEFORE=()
+    for path in "$DEST"/*.mkv; do
+        [[ -f $path ]] || continue
+        name=${path##*/}; BEFORE[$name]=1
+    done
+}
+
+discover_new_mkvs() {
+    local path name
+    NEW_FILES=()
+    for path in "$DEST"/*.mkv; do
+        [[ -f $path ]] || continue
+        name=${path##*/}
+        [[ -v "BEFORE[$name]" ]] || NEW_FILES+=("$name")
+    done
+}
+
+rename_output() {
+    local source=$1 desired=$2 action entered target
+    if [[ -z $desired ]]; then
+        ask entered "Name [keep ${source}]: "
+        [[ -n $(trim "$entered") ]] || return 0
+        desired=$entered
+    else
+        say "MakeMKV created: ${source}"
+        say "Rename to: $(normalise_mkv_name "$desired" || printf '<invalid>')"
+        ask action '[A]ccept, [E]dit filename, [K]eep MakeMKV filename: '
+        case ${action^^} in
+            ''|A) ;;
+            E) ask desired 'Filename: ' ;;
+            K) return 0 ;;
+            *) warn 'Invalid rename choice; keeping MakeMKV filename.'; return 0 ;;
+        esac
+    fi
+    target=$(normalise_mkv_name "$desired") || { warn 'Unsafe filename; keeping MakeMKV filename.'; return 0; }
+    [[ $target != "$source" ]] || return 0
+    [[ ! -e $DEST/$target ]] || { warn "Refusing to overwrite existing file: ${target}"; return 0; }
+    mv -- "$DEST/$source" "$DEST/$target"
+    FINAL_NAMES+=("${source}=>${target}")
+}
+
+declare -a FINAL_NAMES=() OUTCOMES=()
+
+rip_title() {
+    local id=$1 desired=${2:-} rc
+    snapshot_mkvs
+    RIP_STARTED=true
+    say; say "Ripping title ${id}..."
+    if "$DISC_INGEST_MAKEMKV" --robot --progress=-same mkv "$DISC_INGEST_DISC" "$id" "$DEST"; then rc=0; else rc=$?; fi
+    discover_new_mkvs
+    if (( rc != 0 )); then
+        OUTCOMES+=("${id}:failed")
+        warn "Title ${id} failed; any output was retained without renaming."
+        return
+    fi
+    if (( ${#NEW_FILES[@]} != 1 )); then
+        OUTCOMES+=("${id}:ambiguous-${#NEW_FILES[@]}")
+        warn "Title ${id} produced ${#NEW_FILES[@]} new MKVs; no rename was attempted."
+        return
+    fi
+    rename_output "${NEW_FILES[0]}" "$desired"
+    OUTCOMES+=("${id}:success")
+}
+
+rip_all() {
+    local rc file
+    snapshot_mkvs
+    RIP_STARTED=true
+    say; say 'Ripping all titles...'
+    if "$DISC_INGEST_MAKEMKV" --robot --progress=-same mkv "$DISC_INGEST_DISC" all "$DEST"; then rc=0; else rc=$?; fi
+    discover_new_mkvs
+    if (( rc != 0 )); then
+        OUTCOMES+=('all:failed')
+        warn 'MakeMKV failed; output was retained without renaming.'
+        return
+    fi
+    if (( ${#NEW_FILES[@]} == 0 )); then
+        OUTCOMES+=('all:ambiguous-0')
+        warn 'MakeMKV created no new MKVs; no rename was attempted.'
+        return
+    fi
+    for file in "${NEW_FILES[@]}"; do rename_output "$file" ''; done
+    OUTCOMES+=("all:success-${#NEW_FILES[@]}")
+}
+
+cleanup_empty_destination() {
+    [[ $DEST_CREATED == true && -n $DEST ]] || return 0
+    rmdir -- "$DEST" 2>/dev/null || true
+}
+
+safe_log_field() { tr '\t\r\n' '   ' <<< "$1"; }
+write_log() {
+    local version outcome
+    mkdir -p -- "$DISC_INGEST_STATE_HOME" || { warn 'Could not create operation log directory.'; return; }
+    version=$("$DISC_INGEST_MAKEMKV" --robot info "$DISC_INGEST_DISC" 2>&1 | sed -n '1s/.*\"\(MakeMKV[^\"]*\)\".*/\1/p')
+    outcome=$(IFS=,; printf '%s' "${OUTCOMES[*]}")
+    if [[ ! -e $DISC_INGEST_STATE_HOME/operations.tsv ]]; then
+        printf 'timestamp\tdrive\tmakemkv\tdisc\tcategory\ttitles\tdestination\tresults\trenames\n' > "$DISC_INGEST_STATE_HOME/operations.tsv"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date --iso-8601=seconds)" "$(safe_log_field "$DISC_INGEST_DEVICE")" \
+        "$(safe_log_field "$version")" "$(safe_log_field "$DISC_SUMMARY")" \
+        "$(safe_log_field "$TYPE")" "$(safe_log_field "${TITLE_IDS[*]}")" \
+        "$(safe_log_field "$DEST")" "$(safe_log_field "$outcome")" \
+        "$(safe_log_field "${FINAL_NAMES[*]}")" >> "$DISC_INGEST_STATE_HOME/operations.tsv"
+}
+
+main() {
+    local kind root name confirm id desired destination_choice
+    command -v "$DISC_INGEST_MAKEMKV" >/dev/null 2>&1 || die 'makemkvcon is not installed or not in PATH.'
+    say; say 'Disc Ingest'; say; say '[1] Movie'; say '[2] TV'; say '[3] Inspect disc only'; say '[4] Exit'; say
+    ask kind 'Choose [1-4]: '
+    case $kind in
+        1) TYPE=Movie; root=$DISC_INGEST_MOVIES_ROOT ;;
+        2) TYPE=TV; root=$DISC_INGEST_TV_ROOT ;;
+        3)
+            if inspect_disc; then show_disc; fi
+            return 0
+            ;;
+        4) return 0 ;;
+        *) die 'Invalid selection.' ;;
+    esac
+    check_root "$root" "$TYPE"
+    if ! inspect_disc; then return 1; fi
+    show_disc
+    choose_titles
+    while :; do
+        ask name "${TYPE} release folder name: "
+        name=$(trim "$name")
+        valid_basename "$name" || { warn 'Folder name must be a non-empty safe basename.'; continue; }
+        DEST="$root/$name"
+        [[ ! -e $DEST ]] && break
+        say "Destination already exists: ${DEST}"
+        ask destination_choice '[C]hoose a different name or [X] Cancel: '
+        [[ ${destination_choice^^} == C ]] || cancel
+    done
+    declare -A PLANNED=()
+    if [[ $TYPE == Movie && ${#TITLE_IDS[@]} -eq 1 && ${TITLE_IDS[0]} != all ]]; then
+        PLANNED[${TITLE_IDS[0]}]=$name
+    elif [[ $TYPE == TV && ${TITLE_IDS[0]} != all ]]; then
+        for id in "${TITLE_IDS[@]}"; do ask desired "Desired name for title ${id} [keep generated]: "; PLANNED[$id]=$(trim "$desired"); done
+    fi
+    say; say 'Planned rip'; say '------------'
+    say "Drive:       $DISC_INGEST_DEVICE"; say "Disc:        $DISC_INGEST_DISC"; say "Category:    $TYPE"
+    say "Destination: $DEST"; say "Titles:      ${TITLE_IDS[*]}"
+    for id in "${TITLE_IDS[@]}"; do [[ -n ${PLANNED[$id]:-} ]] && say "Title $id requested name: ${PLANNED[$id]}"; done
+    say
+    ask confirm 'Type RIP to begin: '
+    [[ $confirm == RIP ]] || cancel
+    mkdir -- "$DEST" || die "Could not create destination: ${DEST}"
+    DEST_CREATED=true
+    if [[ ${TITLE_IDS[0]} == all ]]; then
+        rip_all
+    else
+        for id in "${TITLE_IDS[@]}"; do rip_title "$id" "${PLANNED[$id]:-}"; done
+    fi
+    write_log
+    local failed=false item
+    for item in "${OUTCOMES[@]}"; do [[ $item == *:success* ]] || failed=true; done
+    if [[ $failed == true ]]; then say 'Rip completed with errors or ambiguous output; review the destination manually.'; else say 'Rip completed.'; fi
+    say "Output retained in: $DEST"
+    if [[ $failed == true ]]; then return 1; fi
+    if command -v eject >/dev/null 2>&1; then
+        ask confirm 'Eject disc now? [Y/n] '
+        [[ ${confirm,,} != n ]] && eject "$DISC_INGEST_DEVICE" || true
+    fi
+}
+
+main
