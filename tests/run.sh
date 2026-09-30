@@ -36,6 +36,12 @@ run_case malformed '4\n' malformed 2; assert_contains 'did not return one valid 
 run_case inspect '4\n' positive 0; assert_contains 'ID 0'; assert_contains 'duration 1:30:00'
 run_case cancel '6\n' positive 0; assert_absent "$CASE_ROOT/state"
 
+set +e
+status_output=$(DISC_INGEST_MAKEMKV="$FAKE" DISC_INGEST_DEVICE="$WORK/status-device" "$SCRIPT" status 2>&1)
+status_rc=$?
+set -e
+[[ $status_rc == 0 && $status_output == *'MakeMKV: available ('* ]] || { printf 'FAIL MakeMKV availability status\n%s\n' "$status_output" >&2; fail=$((fail + 1)); }
+
 run_case movie_accept '1\nC\n2\n0\nThe Matrix (1999)\nRIP\nA\n' positive 0
 assert_file "$CASE_ROOT/movies/The Matrix (1999)/The Matrix (1999).mkv"; assert_file "$CASE_ROOT/state/operations.tsv"
 run_case movie_keep "1\nC\n2\n0\nO'Brien\nRIP\nK\n" positive 0
