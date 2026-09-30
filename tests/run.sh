@@ -56,6 +56,10 @@ run_case movie_keep "1\nC\n2\n0\nO'Brien\nRIP\nK\n" positive 0
 assert_file "$CASE_ROOT/movies/O'Brien/title_t00.mkv"
 run_case movie_edit '1\nC\n2\n0\nFilm\nRIP\nE\nFilm [Director Cut].mkv\n' positive 0
 assert_file "$CASE_ROOT/movies/Film/Film [Director Cut].mkv"
+run_case progress_semantics '1\nC\n2\n0\nSynthetic\nRIP\nA\n' progress_shape 0
+assert_contains 'Overall 50%'
+assert_contains 'Current: Finalizing MKV complete'
+[[ $(grep -o 'Current: Finalizing MKV complete' <<<"$CASE_OUTPUT" | wc -l) -eq 1 ]] || { printf 'FAIL duplicate current completion\n' >&2; fail=$((fail + 1)); }
 run_case traversal '1\nC\n2\n0\n../escape\n' positive 0; assert_contains 'safe basename'; assert_absent "$CASE_ROOT/movies/escape"
 
 mkdir -p "$WORK/conflict/movies/Exists"

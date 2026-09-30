@@ -38,13 +38,24 @@ trap on_interrupt INT TERM
 check_drive() { [[ -e $DISC_INGEST_DEVICE ]] || die "Optical drive is unavailable: $DISC_INGEST_DEVICE. Check the device path and drive connection."; [[ -r $DISC_INGEST_DEVICE ]] || die "Optical drive is not readable: $DISC_INGEST_DEVICE. Check permissions and cdrom membership."; }
 check_root() { [[ -d $1 && -w $1 ]] || die "$2 ingest root is unavailable or not writable: $1"; }
 phase_name() { local p=${1,,}; case $p in *scan*cd*|*detect*) printf 'Detecting drive';; *open*) printf 'Opening disc';; *file*system*) printf 'Reading filesystem';; *title*set*) printf 'Processing title sets';; *content*) printf 'Scanning contents';; *process*title*|*title*processing*) printf 'Processing titles';; *saving*|*mkv*) printf 'Finalizing MKV';; *) printf '%s' "$1";; esac; }
-show_progress() { local phase=$1 cur=$2 total=$3 started=$4 pct elapsed; elapsed=$(( $(date +%s) - started )); if [[ $total =~ ^[1-9][0-9]*$ && $cur =~ ^[0-9]+$ && $cur -le $total ]]; then pct=$((cur*100/total)); say "$(phase_name "$phase")... $pct% | Elapsed $(format_time "$elapsed")"; else say "$(phase_name "$phase")... | Elapsed $(format_time "$elapsed")"; fi; }
+show_progress() { :; } # Rendering is handled from the complete PRGV triple below.
 operation_log() { local kind=$1 stamp; stamp=$(date +%Y%m%dT%H%M%S); mkdir -p -- "$DISC_INGEST_STATE_HOME/logs"; printf '%s/%s-%s.makemkv.log' "$DISC_INGEST_STATE_HOME/logs" "$stamp" "$kind"; }
 
 # MakeMKV documents PRGT/PRGC as progress titles and PRGV as current,total,max.
-# The third value is a constant scale, so percentage uses current/total only.
+# `current` describes the current sub-operation; `total` is operation-wide.
+# Both use `max` as their denominator.  In particular, current/max reaching
+# 100% does not mean the rip is finished while total/max is still advancing.
 run_makemkv() {
-  local log=$1; shift; local line phase='' cur='' total='' started status last_phase='' last_pct=-1 last_bucket=-1 last_render=0 pipe pid now pct bucket
+  local log=$1; shift
+  local line phase='' cur='' total='' max='' started status last_phase='' last_current_phase='' last_overall=-1 last_bucket=-1 last_render=0 last_total=-1 last_sample_time=0 samples=0 eta='' pipe pid now overall current_pct bucket elapsed rate remaining
+  local tty=false
+  [[ -t 1 ]] && tty=true
+  render() { local message=$1
+    if [[ $tty == true ]]; then printf '\r\033[2K%s' "$message"
+    else say "$message"
+    fi
+  }
+  finish_render() { [[ $tty == true ]] && printf '\n'; }
   started=$(date +%s); : > "$log"; pipe=$(mktemp -u "${TMPDIR:-/tmp}/disc-ingest-progress.XXXXXX"); mkfifo -- "$pipe"
   "$DISC_INGEST_MAKEMKV" --robot --progress=-same "$@" >"$pipe" 2>&1 & pid=$!
   while IFS= read -r line; do
@@ -52,25 +63,42 @@ run_makemkv() {
     if [[ $line =~ ^PRG[TC]:[0-9]+,[0-9]+,\"(.*)\"$ ]]; then
       phase=${BASH_REMATCH[1]}
       if [[ $(phase_name "$phase") != "$last_phase" ]]; then
-        last_phase=$(phase_name "$phase"); last_pct=-1; last_bucket=-1; last_render=$(date +%s)
-        say "$last_phase..."
+        last_phase=$(phase_name "$phase"); last_render=$(date +%s)
+        [[ $tty == false ]] && say "Current: $last_phase"
       fi
       [[ $VERBOSE == true ]] && say "MakeMKV phase: $phase"
-    elif [[ $line =~ ^PRGV:([0-9]+),([0-9]+),([0-9]+)$ ]]; then cur=${BASH_REMATCH[1]}; total=${BASH_REMATCH[2]}
-      if [[ $total =~ ^[1-9][0-9]*$ && $cur =~ ^[0-9]+$ && $cur -le $total ]]; then
-        pct=$((cur*100/total)); bucket=$((pct/10))
+    elif [[ $line =~ ^PRGV:([0-9]+),([0-9]+),([0-9]+)$ ]]; then cur=${BASH_REMATCH[1]}; total=${BASH_REMATCH[2]}; max=${BASH_REMATCH[3]}
+      if [[ $max =~ ^[1-9][0-9]*$ && $total =~ ^[0-9]+$ && $total -le $max && $cur =~ ^[0-9]+$ && $cur -le $max ]]; then
+        now=$(date +%s); overall=$((total*100/max)); current_pct=$((cur*100/max)); bucket=$((overall/10)); elapsed=$((now-started)); eta=''
+        # A scope reset invalidates any prior rate estimate until a new
+        # monotonic sample sequence is established.
+        if ((last_total >= 0 && total < last_total)); then samples=0; last_sample_time=0; fi
+        if ((last_total >= 0 && total > last_total && now > last_sample_time)); then
+          samples=$((samples + 1))
+          if ((samples >= 2 && overall >= 5)); then
+            rate=$(( (total-last_total) / (now-last_sample_time) ))
+            if ((rate > 0)); then remaining=$(( (max-total)/rate )); ((remaining >= 0 && remaining < 86400)) && eta=" | ETA ~$(format_time "$remaining")"; fi
+          fi
+        fi
+        last_total=$total; last_sample_time=$now
+        if ((current_pct == 100)) && [[ $last_current_phase != "$last_phase" ]]; then
+          [[ $tty == false ]] && say "Current: ${last_phase:-Working} complete"
+          last_current_phase=$last_phase
+        elif ((current_pct < 100)); then
+          last_current_phase=''
+        fi
         now=$(date +%s)
-        # PRGV counters may reset for nested backend scopes.  Never render a
-        # backwards percentage as one continuous operation; retain raw values
-        # in the diagnostic log and wait for the new scope to make progress.
-        if ((pct >= last_pct)) && { ((bucket > last_bucket)) || ((now-last_render >= 8)); }; then
-          say "${last_phase:-Working}... ${pct}% | Elapsed $(format_time $((now-started)))"
-          last_pct=$pct; last_bucket=$bucket; last_render=$now
+        if ((overall > last_overall)) && { [[ $tty == true ]] || ((bucket > last_bucket)); }; then
+          render "Overall ${overall}% | Elapsed $(format_time "$elapsed")${eta} | Current: ${last_phase:-Working}"
+          last_overall=$overall; last_bucket=$bucket; last_render=$now
+        elif ((now-last_render >= ${DISC_INGEST_HEARTBEAT_SECONDS:-20})); then
+          render "Still ripping... ${overall}% | Elapsed $(format_time "$elapsed") | Current: ${last_phase:-Working}"
+          last_render=$now
         fi
       fi
     elif [[ $line =~ ^MSG:[0-9]+,[0-9]+,[0-9]+,\"([^\"]*) ]]; then [[ $VERBOSE == true ]] && say "MakeMKV: ${BASH_REMATCH[1]}"; fi
   done < "$pipe"
-  wait "$pid"; status=$?; rm -f -- "$pipe"; return "$status"
+  wait "$pid"; status=$?; finish_render; rm -f -- "$pipe"; return "$status"
 }
 parse_robot() { local robot=$1 line id field value; TCOUNT_LINES=(); TITLE_IDS=(); TITLE_NAME=(); TITLE_DURATION=(); TITLE_SIZE=(); DISC_SUMMARY=''; DISC_IDENTITY=''; while IFS= read -r line || [[ -n $line ]]; do
   if [[ $line =~ ^TCOUNT:([0-9]+)$ ]]; then TCOUNT_LINES+=("${BASH_REMATCH[1]}")

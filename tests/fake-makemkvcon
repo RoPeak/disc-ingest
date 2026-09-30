@@ -7,7 +7,7 @@ if [[ $* == *' info '* ]]; then
         empty) printf 'MSG:5010,0,0,"Failed to open disc","",""\nTCOUNT:0\n' ;;
         missing) printf 'MSG:5010,0,0,"Failed to open disc","",""\n' ;;
         malformed) printf 'TCOUNT:not-a-number\n' ;;
-        positive|*)
+        positive|progress_shape|*)
             printf 'PRGT:5018,0,"Opening disc"\nPRGC:3103,0,"Processing titles"\nPRGV:32768,65536,65536\n'
             printf 'CINFO:1,0,"Fake Disc"\nTCOUNT:3\n'
             printf 'TINFO:0,2,0,"Main Feature"\nTINFO:0,9,0,"1:30:00"\nTINFO:0,10,0,"4000000000"\n'
@@ -30,6 +30,11 @@ done
 [[ -n $title ]] || exit 9
 mkdir -p -- "$dest"
 case $mode in
+    progress_shape)
+        printf 'PRGT:5017,0,"Saving to MKV file"\n'
+        printf 'PRGV:65536,32768,65536\nPRGV:65536,39321,65536\nPRGV:65536,45875,65536\nPRGV:65536,65536,65536\n'
+        : > "$dest/title_t$(printf '%02d' "$title").mkv"
+        ;;
     fail) exit 7 ;;
     partial)
         [[ $title == 1 ]] && { : > "$dest/title_t01.mkv"; exit 0; }
