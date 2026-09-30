@@ -36,6 +36,14 @@ run_case malformed '4\n' malformed 2; assert_contains 'did not return one valid 
 run_case inspect '4\n' positive 0; assert_contains 'ID 0'; assert_contains 'duration 1:30:00'
 run_case cancel '6\n' positive 0; assert_absent "$CASE_ROOT/state"
 
+music_fake="$WORK/music-ingest"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" > "$DISC_INGEST_TEST_ARGS"\n' > "$music_fake"
+chmod +x "$music_fake"
+mkdir -p "$WORK/audio/movies" "$WORK/audio/tv"
+: > "$WORK/audio/device"
+DISC_INGEST_TEST_ARGS="$WORK/audio/args" DISC_INGEST_MUSIC_INGEST="$music_fake" DISC_INGEST_MAKEMKV="$FAKE" DISC_INGEST_DEVICE="$WORK/audio/device" DISC_INGEST_MOVIES_ROOT="$WORK/audio/movies" DISC_INGEST_TV_ROOT="$WORK/audio/tv" "$SCRIPT" <<< $'3\nb\n'
+[[ $(<"$WORK/audio/args") == *"--rip-profile bounded"* ]] || { printf 'FAIL bounded audio delegation\n' >&2; fail=$((fail + 1)); }
+
 set +e
 status_output=$(DISC_INGEST_MAKEMKV="$FAKE" DISC_INGEST_DEVICE="$WORK/status-device" "$SCRIPT" status 2>&1)
 status_rc=$?
