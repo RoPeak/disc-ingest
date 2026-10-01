@@ -9,7 +9,7 @@ if [[ $* == *' info '* ]]; then
         malformed) printf 'TCOUNT:not-a-number\n' ;;
         positive|progress_shape|*)
             printf 'PRGT:5018,0,"Opening disc"\nPRGC:3103,0,"Processing titles"\nPRGV:32768,65536,65536\n'
-            printf 'CINFO:1,0,"Fake Disc"\nTCOUNT:3\n'
+            printf 'DRV:0,0,0,0,"FAKE-DRIVE","FAKE-DISC"\nCINFO:1,0,"Fake Disc"\nTCOUNT:3\n'
             printf 'TINFO:0,2,0,"Main Feature"\nTINFO:0,9,0,"1:30:00"\nTINFO:0,10,0,"4000000000"\n'
             printf 'TINFO:1,2,0,"Episode One"\nTINFO:1,9,0,"0:45:00"\nTINFO:1,10,0,"1200000000"\n'
             printf 'TINFO:2,2,0,"Episode Two"\nTINFO:2,9,0,"0:45:00"\nTINFO:2,10,0,"1200000000"\n'

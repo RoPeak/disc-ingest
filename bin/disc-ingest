@@ -13,7 +13,8 @@ DISC_INGEST_STATE_HOME=${DISC_INGEST_STATE_HOME:-${XDG_STATE_HOME:-$HOME/.local/
 DISC_INGEST_CACHE_HOME=${DISC_INGEST_CACHE_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/disc-ingest}
 DISC_INGEST_CACHE_TTL=${DISC_INGEST_CACHE_TTL:-900}
 VERBOSE=false DEBUG=false FORCE_RESCAN=false
-DEST='' DEST_CREATED=false RIP_STARTED=false TYPE='' DISC_SUMMARY='' DISC_IDENTITY=''
+DEST='' DEST_CREATED=false RIP_STARTED=false TYPE='' DISC_SUMMARY='' DISC_IDENTITY='' DISC_DISPLAY_NAME=''
+UI_FD=1 UI_TTY=false POST_FINISHED=false
 declare -a TITLE_IDS=() TCOUNT_LINES=() NEW_FILES=() FINAL_NAMES=() OUTCOMES=()
 declare -A TITLE_NAME=() TITLE_DURATION=() TITLE_SIZE=() BEFORE=()
 SESSION_STARTED=$(date +%s) SESSION_ACTIVE_SECONDS=0 SESSION_DISCS_INSPECTED=0
@@ -27,13 +28,16 @@ ask() { local n=$1 p=$2 a; if ! IFS= read -r -p "$p" a; then say; cancel; fi; pr
 valid_basename() { [[ -n $1 && $1 != */* && $1 != . && $1 != .. ]]; }
 normalise_mkv_name() { local v; v=$(trim "$1"); valid_basename "$v" || return 1; [[ $v == *.mkv ]] || v+=.mkv; printf '%s' "$v"; }
 format_time() { local s=${1:-0}; printf '%02d:%02d' "$((s/60))" "$((s%60))"; }
+format_duration() { local s=${1:-0}; printf '%d:%02d:%02d' "$((s/3600))" "$(((s%3600)/60))" "$((s%60))"; }
+format_runtime() { local s=${1:-0}; if ((s >= 3600)); then printf '%dh %02dm' "$((s/3600))" "$(((s%3600)/60))"; else printf '%dm' "$((s/60))"; fi; }
 format_bytes() { local b=${1:-0}; if ((b >= 1073741824)); then awk -v b="$b" 'BEGIN {printf "%.1f GiB", b/1073741824}'; elif ((b >= 1048576)); then awk -v b="$b" 'BEGIN {printf "%.1f MiB", b/1048576}'; else printf '%s bytes' "$b"; fi; }
+init_terminal() { if [[ -t 1 ]]; then UI_TTY=true; elif [[ -w /dev/tty ]] && { exec {UI_FD}>/dev/tty; } 2>/dev/null; then UI_TTY=true; fi; }
 safe_log_field() { tr '\t\r\n' '   ' <<< "$1"; }
 json_string() { local value=$1; value=${value//\\/\\\\}; value=${value//\"/\\\"}; value=${value//$'\n'/ }; printf '%s' "$value"; }
-reset_disc_state() { DEST='' DEST_CREATED=false RIP_STARTED=false TYPE='' DISC_SUMMARY='' DISC_IDENTITY=''; TITLE_IDS=(); TCOUNT_LINES=(); NEW_FILES=(); FINAL_NAMES=(); OUTCOMES=(); TITLE_NAME=(); TITLE_DURATION=(); TITLE_SIZE=(); BEFORE=(); FORCE_RESCAN=true; }
-record_session_entry() { local status=$1 bytes=$2 active=$3 titles=$4; SESSION_ENTRIES+=("$status|$TYPE|$DISC_SUMMARY|$bytes|$active|$titles|$DEST"); if [[ $status == success ]]; then SESSION_RIPPED=$((SESSION_RIPPED+1)); elif [[ $status == cancelled ]]; then SESSION_CANCELLED=$((SESSION_CANCELLED+1)); else SESSION_FAILED=$((SESSION_FAILED+1)); fi; SESSION_ACTIVE_SECONDS=$((SESSION_ACTIVE_SECONDS+active)); SESSION_BYTES=$((SESSION_BYTES+bytes)); SESSION_CATEGORIES+=("$TYPE"); }
-session_statistics() { local now elapsed entry status category disc bytes active titles dest; now=$(date +%s); elapsed=$((now-SESSION_STARTED)); say; say 'Physical Media Session'; say "  Discs inspected:  $SESSION_DISCS_INSPECTED"; say "  Discs ripped:     $SESSION_RIPPED"; say "  Failed/cancelled: $SESSION_FAILED/$SESSION_CANCELLED"; say "  Media produced:   $(format_bytes "$SESSION_BYTES")"; say "  Active rip time:  $(format_time "$SESSION_ACTIVE_SECONDS")"; say "  Session duration: $(format_time "$elapsed")"; if ((${#SESSION_ENTRIES[@]})); then say; say 'Ripped this session:'; for entry in "${SESSION_ENTRIES[@]}"; do IFS='|' read -r status category disc bytes active titles dest <<< "$entry"; printf '  %s %s (%s, %s, %s)\n' "$([[ $status == success ]] && printf ✓ || printf '!')" "${disc:-Unnamed disc}" "$(format_bytes "$bytes")" "$(format_time "$active")" "$status"; done; fi; return 0; }
-write_session_record() { local directory target entry status category disc bytes active titles dest first=true; directory="$DISC_INGEST_STATE_HOME/sessions"; mkdir -p -- "$directory" || return; target="$directory/$(date +%Y%m%dT%H%M%S)-$$.json"; { printf '{\n  "schema": "disc-ingest-session-v1",\n  "started_at_epoch": %s,\n  "duration_seconds": %s,\n  "active_rip_seconds": %s,\n  "discs_inspected": %s,\n  "discs_ripped": %s,\n  "failed_discs": %s,\n  "cancelled_discs": %s,\n  "bytes_produced": %s,\n  "discs": [' "$SESSION_STARTED" "$(( $(date +%s)-SESSION_STARTED ))" "$SESSION_ACTIVE_SECONDS" "$SESSION_DISCS_INSPECTED" "$SESSION_RIPPED" "$SESSION_FAILED" "$SESSION_CANCELLED" "$SESSION_BYTES"; for entry in "${SESSION_ENTRIES[@]}"; do IFS='|' read -r status category disc bytes active titles dest <<< "$entry"; [[ $first == true ]] || printf ','; first=false; printf '\n    {"status":"%s","category":"%s","disc":"%s","bytes":%s,"active_seconds":%s,"titles":"%s","destination":"%s"}' "$(json_string "$status")" "$(json_string "$category")" "$(json_string "$disc")" "$bytes" "$active" "$(json_string "$titles")" "$(json_string "$dest")"; done; printf '\n  ]\n}\n'; } > "$target"; }
+reset_disc_state() { DEST='' DEST_CREATED=false RIP_STARTED=false TYPE='' DISC_SUMMARY='' DISC_IDENTITY='' DISC_DISPLAY_NAME=''; TITLE_IDS=(); TCOUNT_LINES=(); NEW_FILES=(); FINAL_NAMES=(); OUTCOMES=(); TITLE_NAME=(); TITLE_DURATION=(); TITLE_SIZE=(); BEFORE=(); FORCE_RESCAN=true; }
+record_session_entry() { local status=$1 bytes=$2 active=$3 titles=$4 duration=${5:-0}; SESSION_ENTRIES+=("$status|$TYPE|$DISC_DISPLAY_NAME|$bytes|$active|$titles|$DEST|$duration"); if [[ $status == success ]]; then SESSION_RIPPED=$((SESSION_RIPPED+1)); elif [[ $status == cancelled ]]; then SESSION_CANCELLED=$((SESSION_CANCELLED+1)); else SESSION_FAILED=$((SESSION_FAILED+1)); fi; SESSION_ACTIVE_SECONDS=$((SESSION_ACTIVE_SECONDS+active)); SESSION_BYTES=$((SESSION_BYTES+bytes)); SESSION_CATEGORIES+=("$TYPE"); }
+session_statistics() { local now elapsed entry status category disc bytes active titles dest duration runtime=0 rate; now=$(date +%s); elapsed=$((now-SESSION_STARTED)); for entry in "${SESSION_ENTRIES[@]}"; do IFS='|' read -r status category disc bytes active titles dest duration <<< "$entry"; runtime=$((runtime+duration)); done; say; say 'Physical Media Session'; say "  Discs inspected     $SESSION_DISCS_INSPECTED"; say "  Discs ripped        $SESSION_RIPPED"; say "  Failed              $SESSION_FAILED"; say "  Cancelled           $SESSION_CANCELLED"; say; say "  Media produced      $(format_bytes "$SESSION_BYTES")"; say "  Media runtime       $(format_runtime "$runtime")"; say "  Active rip time     $(format_time "$SESSION_ACTIVE_SECONDS")"; say "  Session duration    $(format_time "$elapsed")"; if ((SESSION_ACTIVE_SECONDS > 0)); then rate=$(awk -v b="$SESSION_BYTES" -v s="$SESSION_ACTIVE_SECONDS" 'BEGIN {printf "%.1f MiB/s", b/s/1048576}'); say "  Average throughput  $rate"; fi; if ((${#SESSION_ENTRIES[@]})); then say; say 'Ripped'; for entry in "${SESSION_ENTRIES[@]}"; do IFS='|' read -r status category disc bytes active titles dest duration <<< "$entry"; printf '  %s %s\n    %s · %s · %s · %s\n' "$([[ $status == success ]] && printf ✓ || printf '!')" "${disc:-Unnamed disc}" "$category" "$(format_duration "$duration")" "$(format_bytes "$bytes")" "$(format_time "$active")"; done; fi; return 0; }
+write_session_record() { local directory target entry status category disc bytes active titles dest duration first=true; directory="$DISC_INGEST_STATE_HOME/sessions"; mkdir -p -- "$directory" || return; target="$directory/$(date +%Y%m%dT%H%M%S)-$$.json"; { printf '{\n  "schema": "disc-ingest-session-v2",\n  "started_at_epoch": %s,\n  "duration_seconds": %s,\n  "active_rip_seconds": %s,\n  "discs_inspected": %s,\n  "discs_ripped": %s,\n  "failed_discs": %s,\n  "cancelled_discs": %s,\n  "bytes_produced": %s,\n  "discs": [' "$SESSION_STARTED" "$(( $(date +%s)-SESSION_STARTED ))" "$SESSION_ACTIVE_SECONDS" "$SESSION_DISCS_INSPECTED" "$SESSION_RIPPED" "$SESSION_FAILED" "$SESSION_CANCELLED" "$SESSION_BYTES"; for entry in "${SESSION_ENTRIES[@]}"; do IFS='|' read -r status category disc bytes active titles dest duration <<< "$entry"; [[ $first == true ]] || printf ','; first=false; printf '\n    {"status":"%s","category":"%s","display_name":"%s","disc":"%s","produced_bytes":%s,"bytes":%s,"active_rip_seconds":%s,"active_seconds":%s,"title_ids":"%s","titles":"%s","media_duration_seconds":%s,"destination":"%s"}' "$(json_string "$status")" "$(json_string "$category")" "$(json_string "$disc")" "$(json_string "$disc")" "$bytes" "$bytes" "$active" "$active" "$(json_string "$titles")" "$(json_string "$titles")" "$duration" "$(json_string "$dest")"; done; printf '\n  ]\n}\n'; } > "$target"; }
 usage() { cat <<'EOF'
 Usage: disc-ingest [--verbose|--debug] [--rescan] [status|help]
 
@@ -59,13 +63,13 @@ run_makemkv() {
   local line phase='' cur='' total='' max='' started status last_phase='' last_current_phase='' last_overall=-1 last_bucket=-1 last_render=0 last_total=-1 last_sample_time=0 samples=0 eta='' pipe pid now overall current_pct bucket elapsed rate remaining
   local tty=false operation=inspection
   [[ " $* " == *" mkv "* ]] && operation=ripping
-  [[ -t 1 ]] && tty=true
+  [[ $UI_TTY == true ]] && tty=true
   render() { local message=$1
-    if [[ $tty == true ]]; then printf '\r\033[2K%s' "$message"
+    if [[ $tty == true ]]; then printf '\r\033[2K%s' "$message" >&"$UI_FD"
     else say "$message"
     fi
   }
-  finish_render() { [[ $tty == true ]] && printf '\n'; }
+  finish_render() { [[ $tty == true ]] && printf '\n' >&"$UI_FD"; }
   started=$(date +%s); : > "$log"; pipe=$(mktemp -u "${TMPDIR:-/tmp}/disc-ingest-progress.XXXXXX"); mkfifo -- "$pipe"
   "$DISC_INGEST_MAKEMKV" --robot --progress=-same "$@" >"$pipe" 2>&1 & pid=$!
   while IFS= read -r line; do
@@ -74,12 +78,23 @@ run_makemkv() {
       phase=${BASH_REMATCH[1]}
       if [[ $(phase_name "$phase") != "$last_phase" ]]; then
         last_phase=$(phase_name "$phase"); last_render=$(date +%s)
-        [[ $tty == false ]] && say "Current: $last_phase"
+        if [[ $operation == inspection ]]; then
+          render "Inspecting: $last_phase | Elapsed $(format_time "$((last_render-started))")"
+        elif [[ $tty == false ]]; then
+          say "Current: $last_phase"
+        fi
       fi
       [[ $VERBOSE == true ]] && say "MakeMKV phase: $phase"
     elif [[ $line =~ ^PRGV:([0-9]+),([0-9]+),([0-9]+)$ ]]; then cur=${BASH_REMATCH[1]}; total=${BASH_REMATCH[2]}; max=${BASH_REMATCH[3]}
       if [[ $max =~ ^[1-9][0-9]*$ && $total =~ ^[0-9]+$ && $total -le $max && $cur =~ ^[0-9]+$ && $cur -le $max ]]; then
-        now=$(date +%s); overall=$((total*100/max)); current_pct=$((cur*100/max)); bucket=$((overall/10)); elapsed=$((now-started)); eta=''
+        now=$(date +%s); overall=$((total*100/max)); [[ $operation == ripping && $overall -ge 100 ]] && overall=99; current_pct=$((cur*100/max)); bucket=$((overall/10)); elapsed=$((now-started)); eta=''
+        if [[ $operation == inspection ]]; then
+          if ((now-last_render >= 1)); then
+            render "Inspecting: ${last_phase:-Working} | Elapsed $(format_time "$elapsed")"
+            last_render=$now
+          fi
+          continue
+        fi
         # A scope reset invalidates any prior rate estimate until a new
         # monotonic sample sequence is established.
         if ((last_total >= 0 && total < last_total)); then samples=0; last_sample_time=0; fi
@@ -100,9 +115,9 @@ run_makemkv() {
         now=$(date +%s)
         if ((overall > last_overall)) && { [[ $tty == true ]] || ((bucket > last_bucket)); }; then
           if [[ $tty == true ]]; then
-            local width=$(( ${COLUMNS:-80} - 44 )) filled empty
-            ((width<10)) && width=10; filled=$((overall*width/100)); empty=$((width-filled))
-            render "${operation^}: [$(printf '%*s' "$filled" '' | tr ' ' '█')$(printf '%*s' "$empty" '' | tr ' ' '░')] ${overall}% | $(format_time "$elapsed")${eta} | ${last_phase:-Working}"
+            local width=32 filled empty
+            filled=$((overall*width/100)); empty=$((width-filled))
+            render "${operation^}: [$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' "$empty" '' | tr ' ' '-')] ${overall}% | $(format_time "$elapsed")${eta} | ${last_phase:-Working}"
           else
             render "${operation^}: ${overall}% | Elapsed $(format_time "$elapsed")${eta} | Current: ${last_phase:-Working}"
           fi
@@ -131,13 +146,15 @@ title_exists() { local x=$1 i; for i in "${TITLE_IDS[@]}"; do [[ $i == "$x" ]] &
 choose_titles() { local s id raw; say; say '[1] All titles'; say '[2] One title'; say '[3] Specific title IDs'; say '[4] Cancel'; ask s 'Choose [1-4]: '; case $s in 1) TITLE_IDS=(all);; 2) ask id 'Title ID: '; [[ $id =~ ^[0-9]+$ ]] && title_exists "$id" || die 'Title ID is not present on this disc.'; TITLE_IDS=($id);; 3) ask raw 'Title IDs, comma-separated: '; IFS=, read -ra TITLE_IDS <<< "$raw"; for id in "${!TITLE_IDS[@]}"; do TITLE_IDS[$id]=$(trim "${TITLE_IDS[$id]}"); [[ ${TITLE_IDS[$id]} =~ ^[0-9]+$ ]] && title_exists "${TITLE_IDS[$id]}" || die 'A supplied title ID is not present on this disc.'; done;; 4) cancel;; *) die 'Invalid selection.';; esac; }
 snapshot_mkvs() { local p n; BEFORE=(); for p in "$DEST"/*.mkv; do [[ -f $p ]] || continue; n=${p##*/}; BEFORE[$n]=1; done; }; discover_new_mkvs() { local p n; NEW_FILES=(); sleep "${DISC_INGEST_OUTPUT_SETTLE_SECONDS:-1}"; for p in "$DEST"/*.mkv; do [[ -f $p ]] || continue; n=${p##*/}; [[ -v "BEFORE[$n]" ]] || NEW_FILES+=("$n"); done; }
 rename_output() { local source=$1 desired=${2:-} action entered target; if [[ -z $desired ]]; then ask entered "Name [keep $source]: "; [[ -n $(trim "$entered") ]] || return 0; desired=$entered; else say "MakeMKV created: $source"; say "Rename to: $(normalise_mkv_name "$desired" || printf '<invalid>')"; ask action '[A]ccept, [E]dit filename, [K]eep MakeMKV filename: '; case ${action^^} in ''|A);; E) ask desired 'Filename: ';; K) return 0;; *) warn 'Invalid rename choice; keeping MakeMKV filename.'; return 0;; esac; fi; target=$(normalise_mkv_name "$desired") || { warn 'Unsafe filename; keeping MakeMKV filename.'; return 0; }; [[ $target == "$source" ]] && return 0; [[ ! -e $DEST/$target ]] || { warn "Refusing to overwrite existing file: $target"; return 0; }; mv -- "$DEST/$source" "$DEST/$target"; FINAL_NAMES+=("$source=>$target"); }
-rip_title() { local id=$1 desired=${2:-} rc log; snapshot_mkvs; RIP_STARTED=true; log=$(operation_log rip); say; say "Ripping title $id..."; if run_makemkv "$log" mkv "$DISC_INGEST_DISC" "$id" "$DEST"; then rc=0; else rc=$?; fi; discover_new_mkvs; if ((rc)); then OUTCOMES+=("$id:failed"); warn "Rip failed while reading title $id."; warn "Diagnostic log: $log"; return; fi; if ((${#NEW_FILES[@]} != 1)); then OUTCOMES+=("$id:ambiguous-${#NEW_FILES[@]}"); warn "Title $id produced ${#NEW_FILES[@]} new MKVs; no rename was attempted."; return; fi; rename_output "${NEW_FILES[0]}" "$desired"; OUTCOMES+=("$id:success"); }
+rip_title() { local id=$1 desired=${2:-} rc log; snapshot_mkvs; RIP_STARTED=true; log=$(operation_log rip); say; say "Ripping title $id..."; if run_makemkv "$log" mkv "$DISC_INGEST_DISC" "$id" "$DEST"; then rc=0; else rc=$?; fi; discover_new_mkvs; if ((rc)); then OUTCOMES+=("$id:failed"); warn "Rip failed while reading title $id."; warn "Diagnostic log: $log"; return; fi; if ((${#NEW_FILES[@]} != 1)); then OUTCOMES+=("$id:ambiguous-${#NEW_FILES[@]}"); warn "Title $id produced ${#NEW_FILES[@]} new MKVs; no rename was attempted."; return; fi; say 'Ripping: [################################] 100%'; rename_output "${NEW_FILES[0]}" "$desired"; OUTCOMES+=("$id:success"); }
 rip_all() { local rc log f; snapshot_mkvs; RIP_STARTED=true; log=$(operation_log rip); say; say 'Ripping all titles...'; if run_makemkv "$log" mkv "$DISC_INGEST_DISC" all "$DEST"; then rc=0; else rc=$?; fi; discover_new_mkvs; if ((rc)); then OUTCOMES+=(all:failed); warn "MakeMKV failed. Diagnostic log: $log"; return; fi; ((${#NEW_FILES[@]})) || { OUTCOMES+=(all:ambiguous-0); warn 'MakeMKV created no new MKVs; no rename was attempted.'; return; }; for f in "${NEW_FILES[@]}"; do rename_output "$f" ''; done; OUTCOMES+=("all:success-${#NEW_FILES[@]}"); }
 cleanup_empty_destination() { [[ $DEST_CREATED == true && -n $DEST ]] && rmdir -- "$DEST" 2>/dev/null || true; }
 write_log() { local outcome; mkdir -p -- "$DISC_INGEST_STATE_HOME" || return; outcome=$(IFS=,; printf '%s' "${OUTCOMES[*]}"); [[ -e $DISC_INGEST_STATE_HOME/operations.tsv ]] || printf 'timestamp\tdrive\tdisc\tcategory\ttitles\tdestination\tresults\trenames\n' > "$DISC_INGEST_STATE_HOME/operations.tsv"; printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date --iso-8601=seconds)" "$(safe_log_field "$DISC_INGEST_DEVICE")" "$(safe_log_field "$DISC_SUMMARY")" "$TYPE" "${TITLE_IDS[*]}" "$DEST" "$outcome" "${FINAL_NAMES[*]}" >> "$DISC_INGEST_STATE_HOME/operations.tsv"; }
 audio_cd() { local profile; check_drive; say; say 'Audio CD selected.'; say 'Drive detected. Delegating secure CD workflow to music-ingest.'; say '[S] Secure (five retries per track)'; say '[B] Bounded secure (one retry; checksums retained)'; ask profile 'Choose [S/b]: '; case "${profile^^}" in ''|S) profile=secure;; B) profile=bounded;; *) warn 'Invalid CD rip profile.'; return 2;; esac; command -v "$DISC_INGEST_MUSIC_INGEST" >/dev/null 2>&1 || { warn 'music-ingest is unavailable; install or expose it on PATH.'; return 2; }; "$DISC_INGEST_MUSIC_INGEST" cd --device "$DISC_INGEST_DEVICE" --rip-profile "$profile"; }
 status() { local mk; say 'Physical Media Ingest status'; say "Optical device: $DISC_INGEST_DEVICE $([[ -e $DISC_INGEST_DEVICE ]] && printf '(present)' || printf '(unavailable)')"; if mk=$(command -v "$DISC_INGEST_MAKEMKV" 2>/dev/null); then say "MakeMKV: available ($mk)"; else say 'MakeMKV: not installed'; fi; say "music-ingest: $(command -v "$DISC_INGEST_MUSIC_INGEST" >/dev/null 2>&1 && printf available || printf unavailable)"; say "Whipper: $(command -v whipper >/dev/null 2>&1 && whipper --version 2>/dev/null || printf 'not installed')"; say 'Whipper drive offset: query in music-ingest CD setup (never assumed).'; say "Movies Incoming: $DISC_INGEST_MOVIES_ROOT"; say "TV Incoming: $DISC_INGEST_TV_ROOT"; }
 destination_bytes() { local p total=0; for p in "$DEST"/*.mkv; do [[ -f $p ]] && total=$((total + $(stat -c %s -- "$p"))); done; printf '%s' "$total"; }
+duration_seconds() { local value=$1 h m s; IFS=: read -r h m s <<< "$value"; [[ $h =~ ^[0-9]+$ && $m =~ ^[0-9]+$ && $s =~ ^[0-9]+$ ]] || { printf 0; return; }; printf '%s' "$((10#$h*3600 + 10#$m*60 + 10#$s))"; }
+selected_duration_seconds() { local id total=0; for id in "${TITLE_IDS[@]}"; do [[ $id == all ]] && { for id in "${!TITLE_DURATION[@]}"; do total=$((total + $(duration_seconds "${TITLE_DURATION[$id]}"))); done; break; }; total=$((total + $(duration_seconds "${TITLE_DURATION[$id]:-0}"))); done; printf '%s' "$total"; }
 video_flow() {
   local kind=$1 root=$2 name confirm choice id desired started bytes status=success
   check_root "$root" "$kind"; inspect_disc || return
@@ -148,6 +165,7 @@ video_flow() {
     DEST="$root/$name"; [[ ! -e $DEST ]] && break
     say "Destination already exists: $DEST"; ask choice '[C]hoose a different name or [X] Cancel: '; [[ ${choice^^} == C ]] || return 2
   done
+  DISC_DISPLAY_NAME=$name
   declare -A planned=()
   if [[ $kind == Movie && ${#TITLE_IDS[@]} -eq 1 && ${TITLE_IDS[0]} != all ]]; then planned[${TITLE_IDS[0]}]=$name
   elif [[ $kind == TV && ${TITLE_IDS[0]} != all ]]; then for id in "${TITLE_IDS[@]}"; do ask desired "Desired name for title $id [keep generated]: "; planned[$id]=$(trim "$desired"); done; fi
@@ -157,21 +175,23 @@ video_flow() {
   if [[ ${TITLE_IDS[0]} == all ]]; then rip_all; else for id in "${TITLE_IDS[@]}"; do rip_title "$id" "${planned[$id]:-}"; done; fi
   write_log; bytes=$(destination_bytes)
   if [[ " ${OUTCOMES[*]} " == *failed* || " ${OUTCOMES[*]} " == *ambiguous* ]]; then status=failed; fi
-  record_session_entry "$status" "$bytes" "$(( $(date +%s)-started ))" "${TITLE_IDS[*]}"
+  record_session_entry "$status" "$bytes" "$(( $(date +%s)-started ))" "${TITLE_IDS[*]}" "$(selected_duration_seconds)"
   [[ $status == success ]] && { say; say 'DVD rip complete.'; say "Stored in: $DEST"; }
   [[ $status == success ]]
 }
 organise_session_media() { local kind; ((${#SESSION_CATEGORIES[@]})) || { say 'No successful video discs in this session.'; return; }; kind=${SESSION_CATEGORIES[0]}; for TYPE in "${SESSION_CATEGORIES[@]}"; do [[ $TYPE == "$kind" ]] || { kind=''; break; }; done; if [[ -z $kind ]]; then ask kind '[M]ovies or [T]V: '; [[ ${kind^^} == M ]] && kind=Movie || kind=TV; fi; command -v video-ingest >/dev/null 2>&1 || { warn 'video-ingest is unavailable on PATH.'; return; }; [[ $kind == Movie ]] && video-ingest movies || video-ingest tv; }
+post_rip_menu() { local choice; say; say "${DISC_DISPLAY_NAME:-Disc} ripped successfully."; say 'What next?'; say '[N] Rip another disc'; say '[O] Organise ripped media'; say '[S] Session statistics'; say '[F] Finish'; ask choice 'Choose [N/O/S/F]: '; case ${choice^^} in N|'') reset_disc_state;; O) organise_session_media;; S) session_statistics; post_rip_menu;; F) session_statistics; write_session_record; POST_FINISHED=true;; *) warn 'Invalid selection.'; post_rip_menu;; esac; }
 main() {
   local choice rc
+  init_terminal
   case ${1:-} in --help|help) usage; return;; --verbose) VERBOSE=true; shift;; --debug) DEBUG=true; VERBOSE=true; shift;; --rescan) FORCE_RESCAN=true; shift;; status) status; return;; '') ;; *) usage; die "Unknown argument: $1";; esac
   command -v "$DISC_INGEST_MAKEMKV" >/dev/null 2>&1 || die 'makemkvcon is not installed or not in PATH.'
   while :; do
     say; say 'Physical Media Ingest'; say '[1] Movie DVD / video disc'; say '[2] TV DVD / video disc'; say '[3] Audio CD'; say '[4] Inspect inserted disc'; say '[5] Drive / configuration status'; say '[6] Session statistics'; say '[7] Organise ripped media'; say '[8] Finish'
     ask choice 'Choose [1-8]: '
     case $choice in
-      1) TYPE=Movie; if video_flow Movie "$DISC_INGEST_MOVIES_ROOT"; then rc=0; else rc=$?; fi; [[ $rc -eq 2 ]] && record_session_entry cancelled 0 0 '' ; reset_disc_state ;;
-      2) TYPE=TV; if video_flow TV "$DISC_INGEST_TV_ROOT"; then rc=0; else rc=$?; fi; [[ $rc -eq 2 ]] && record_session_entry cancelled 0 0 '' ; reset_disc_state ;;
+      1) TYPE=Movie; if video_flow Movie "$DISC_INGEST_MOVIES_ROOT"; then rc=0; else rc=$?; fi; if [[ $rc -eq 0 ]]; then post_rip_menu; [[ $POST_FINISHED == true ]] && return; elif [[ $rc -eq 2 ]]; then record_session_entry cancelled 0 0 '' 0; reset_disc_state; fi ;;
+      2) TYPE=TV; if video_flow TV "$DISC_INGEST_TV_ROOT"; then rc=0; else rc=$?; fi; if [[ $rc -eq 0 ]]; then post_rip_menu; [[ $POST_FINISHED == true ]] && return; elif [[ $rc -eq 2 ]]; then record_session_entry cancelled 0 0 '' 0; reset_disc_state; fi ;;
       3) audio_cd || true ;;
       4) if inspect_disc; then show_disc; fi ;;
       5) status ;;

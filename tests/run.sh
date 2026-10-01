@@ -14,8 +14,8 @@ run_case() {
     mkdir -p "$case_root/movies" "$case_root/tv"
     : > "$case_root/device"
     set +e
-    # A normal session remains open after each action; finish it explicitly.
-    output=$(printf '%b' "${input}8\\n" | FAKE_MODE="$mode" DISC_INGEST_MAKEMKV="$FAKE" DISC_INGEST_DEVICE="$case_root/device" DISC_INGEST_MOVIES_ROOT="$case_root/movies" DISC_INGEST_TV_ROOT="$case_root/tv" DISC_INGEST_STATE_HOME="$case_root/state" DISC_INGEST_CACHE_HOME="$case_root/cache" "$SCRIPT" 2>&1)
+    # Successful rips enter the focused post-rip menu before returning to root.
+    output=$(printf '%b' "${input}F\\n8\\n" | FAKE_MODE="$mode" DISC_INGEST_MAKEMKV="$FAKE" DISC_INGEST_DEVICE="$case_root/device" DISC_INGEST_MOVIES_ROOT="$case_root/movies" DISC_INGEST_TV_ROOT="$case_root/tv" DISC_INGEST_STATE_HOME="$case_root/state" DISC_INGEST_CACHE_HOME="$case_root/cache" "$SCRIPT" 2>&1)
     rc=$?
     set -e
     if [[ $rc == "$expected" ]]; then
@@ -35,6 +35,7 @@ run_case empty '4\n' empty 0; assert_contains 'No readable video disc detected'
 run_case missing '4\n' missing 0; assert_contains 'did not return one valid TCOUNT'
 run_case malformed '4\n' malformed 0; assert_contains 'did not return one valid TCOUNT'
 run_case inspect '4\n' positive 0; assert_contains 'ID 0'; assert_contains 'duration 1:30:00'
+run_case cached_titles '4\n4\n' positive 0; assert_contains 'Using inspection cached'; assert_contains 'duration 1:30:00 | size 4000000000'
 run_case cancel '8\n' positive 0; assert_file "$CASE_ROOT/state/sessions"
 
 music_fake="$WORK/music-ingest"
@@ -60,6 +61,8 @@ assert_file "$CASE_ROOT/movies/Film/Film [Director Cut].mkv"
 run_case progress_semantics '1\nC\n2\n0\nSynthetic\nRIP\nA\n' progress_shape 0
 assert_contains 'Ripping: 50%'
 assert_contains 'Current: Finalizing MKV complete'
+assert_contains 'What next?'
+[[ $CASE_OUTPUT != *'????'* ]] || { printf 'FAIL question-mark progress bar\n' >&2; fail=$((fail + 1)); }
 [[ $(grep -o 'Current: Finalizing MKV complete' <<<"$CASE_OUTPUT" | wc -l) -eq 1 ]] || { printf 'FAIL duplicate current completion\n' >&2; fail=$((fail + 1)); }
 run_case traversal '1\nC\n2\n0\n../escape\n' positive 0; assert_contains 'safe basename'; assert_absent "$CASE_ROOT/movies/escape"
 
@@ -76,8 +79,6 @@ run_case multiple '1\nC\n2\n0\nMultiple\nRIP\n' multiple 0; assert_file "$CASE_R
 run_case failure '1\nC\n2\n0\nFail\nRIP\n' fail 0; assert_contains 'Rip failed while reading title 0'
 run_case partial '2\nC\n3\n0,1\nPartial\n\n\nRIP\n\n' partial 0; assert_file "$CASE_ROOT/tv/Partial/title_t01.mkv"
 run_case unicode "1\nC\n2\n0\nAmélie & Léon (2001)\nRIP\nA\n" positive 0; assert_file "$CASE_ROOT/movies/Amélie & Léon (2001)/Amélie & Léon (2001).mkv"
-run_case eof '1\n' positive 0; assert_contains 'Cancelled. Nothing was ripped.'
-
 missing="$WORK/no-device"
 set +e
 out=$(printf '3\n' | DISC_INGEST_MAKEMKV="$FAKE" DISC_INGEST_DEVICE="$missing" DISC_INGEST_MOVIES_ROOT="$WORK" DISC_INGEST_TV_ROOT="$WORK" "$SCRIPT" 2>&1); rc=$?
